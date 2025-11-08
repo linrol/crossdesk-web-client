@@ -12,6 +12,15 @@ const elements = {
   disconnectBtn: document.getElementById("disconnect"),
   media: document.getElementById("media"),
   video: document.getElementById("video"),
+  connectionOverlay: document.getElementById("connection-overlay"),
+  connectedOverlay: document.getElementById("connected-overlay"),
+  connectionStatusLed: document.getElementById("connection-status-led"),
+  connectionStatusIndicator: document.getElementById("connection-status-indicator"),
+  connectedStatusLed: document.getElementById("connected-status-led"),
+  debugPanel: document.getElementById("debug-panel"),
+  debugToggle: document.getElementById("debug-toggle"),
+  debugClose: document.getElementById("debug-close"),
+  disconnectConnected: document.getElementById("disconnect-connected"),
 };
 
 // Config section (can be overridden by setting window.CROSSDESK_CONFIG before this script runs)
@@ -132,9 +141,17 @@ function createPeerConnection() {
   const peer = new RTCPeerConnection(config);
 
   peer.addEventListener("iceconnectionstatechange", () => {
-    updateStatus(elements.iceState, peer.iceConnectionState);
+    const state = peer.iceConnectionState;
+    updateStatus(elements.iceState, state);
+    // Update status LED: connected when ICE state is "connected"
+    const isConnected = state === "connected";
+    updateStatusLed(elements.connectionStatusLed, isConnected, true);
+    updateStatusLed(elements.connectedStatusLed, isConnected, false);
   });
   updateStatus(elements.iceState, peer.iceConnectionState);
+  const isConnected = peer.iceConnectionState === "connected";
+  updateStatusLed(elements.connectionStatusLed, isConnected, true);
+  updateStatusLed(elements.connectedStatusLed, isConnected, false);
 
   peer.addEventListener("signalingstatechange", () => {
     updateStatus(elements.signalingState, peer.signalingState);
@@ -209,8 +226,11 @@ function bindDataChannel(channel) {
 
   channel.addEventListener("message", (event) => {
     if (typeof event.data !== "string" || !elements.dataChannelLog) return;
+    // Only log if debug mode is enabled
+    if (debugMode) {
     elements.dataChannelLog.textContent += `< ${event.data}\n`;
     elements.dataChannelLog.scrollTop = elements.dataChannelLog.scrollHeight;
+    }
   });
 }
 
@@ -271,7 +291,14 @@ function connect() {
   if (!elements.connectBtn || !elements.disconnectBtn || !elements.media) return;
   elements.connectBtn.style.display = "none";
   elements.disconnectBtn.style.display = "inline-block";
-  elements.media.style.display = "block";
+  elements.media.style.display = "flex";
+  // Hide connection overlay, show connected overlay
+  if (elements.connectionOverlay) {
+    elements.connectionOverlay.style.display = "none";
+  }
+  if (elements.connectedOverlay) {
+    elements.connectedOverlay.style.display = "block";
+  }
   sendJoinRequest();
 }
 
@@ -280,6 +307,13 @@ function disconnect() {
   elements.disconnectBtn.style.display = "none";
   elements.connectBtn.style.display = "inline-block";
   elements.media.style.display = "none";
+  // Show connection overlay, hide connected overlay
+  if (elements.connectionOverlay) {
+    elements.connectionOverlay.style.display = "flex";
+  }
+  if (elements.connectedOverlay) {
+    elements.connectedOverlay.style.display = "none";
+  }
 
   sendLeaveRequest();
   teardownPeerConnection();
@@ -287,6 +321,9 @@ function disconnect() {
   updateStatus(elements.iceState, "");
   updateStatus(elements.signalingState, "");
   updateStatus(elements.dataChannelState, "closed");
+  // Reset status LEDs and hide indicator
+  updateStatusLed(elements.connectionStatusLed, false, true);
+  updateStatusLed(elements.connectedStatusLed, false, false);
 }
 
 function teardownPeerConnection() {
@@ -308,6 +345,58 @@ function teardownPeerConnection() {
 function updateStatus(element, value) {
   if (!element) return;
   element.textContent = value || "";
+}
+
+// Update status LED indicator
+function updateStatusLed(ledElement, isConnected, showIndicator = true) {
+  if (!ledElement) return;
+  if (isConnected) {
+    ledElement.classList.remove("status-led-off");
+    ledElement.classList.add("status-led-on");
+    // 显示指示灯容器
+    if (showIndicator && elements.connectionStatusIndicator) {
+      elements.connectionStatusIndicator.style.display = "flex";
+    }
+  } else {
+    ledElement.classList.remove("status-led-on");
+    ledElement.classList.add("status-led-off");
+    // 隐藏指示灯容器（未连接时）
+    if (showIndicator && elements.connectionStatusIndicator) {
+      elements.connectionStatusIndicator.style.display = "none";
+    }
+  }
+}
+
+// Debug mode control
+let debugMode = localStorage.getItem("crossdesk-debug") === "true";
+
+function toggleDebugMode() {
+  debugMode = !debugMode;
+  localStorage.setItem("crossdesk-debug", debugMode.toString());
+  updateDebugPanel();
+}
+
+function updateDebugPanel() {
+  if (elements.debugPanel) {
+    elements.debugPanel.style.display = debugMode ? "flex" : "none";
+  }
+  if (elements.debugToggle) {
+    elements.debugToggle.style.display = "block";
+    elements.debugToggle.textContent = debugMode ? "关闭调试" : "调试";
+  }
+}
+
+// Initialize debug mode
+updateDebugPanel();
+if (elements.debugToggle) {
+  elements.debugToggle.addEventListener("click", toggleDebugMode);
+}
+if (elements.debugClose) {
+  elements.debugClose.addEventListener("click", () => {
+    debugMode = false;
+    localStorage.setItem("crossdesk-debug", "false");
+    updateDebugPanel();
+  });
 }
 
 function enableConnectButton(enabled) {
@@ -389,6 +478,10 @@ if (elements.disconnectBtn) {
   elements.disconnectBtn.addEventListener("click", disconnect);
 }
 
+if (elements.disconnectConnected) {
+  elements.disconnectConnected.addEventListener("click", disconnect);
+}
+
 if (elements.setDisplayBtn) {
   elements.setDisplayBtn.addEventListener("click", setDisplayId);
 }
@@ -410,4 +503,55 @@ window.connect = connect;
 window.disconnect = disconnect;
 window.sendDataChannelMessage = sendDataChannelMessage;
 window.setDisplayId = setDisplayId;
+
+// 禁止复制、剪切、粘贴等操作
+document.addEventListener("copy", (event) => {
+  event.preventDefault();
+  event.clipboardData.setData("text/plain", "");
+  return false;
+});
+
+document.addEventListener("cut", (event) => {
+  event.preventDefault();
+  event.clipboardData.setData("text/plain", "");
+  return false;
+});
+
+document.addEventListener("paste", (event) => {
+  // 允许在输入框中粘贴
+  const target = event.target;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+    return; // 允许输入框粘贴
+  }
+  event.preventDefault();
+  return false;
+});
+
+// 阻止右键菜单（可选，但保留以增强保护）
+document.addEventListener("contextmenu", (event) => {
+  // 允许在输入框上显示右键菜单
+  const target = event.target;
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
+    return; // 允许输入框右键菜单
+  }
+  event.preventDefault();
+  return false;
+});
+
+// 阻止选择文本（通过鼠标拖拽）
+document.addEventListener("selectstart", (event) => {
+  const target = event.target;
+  // 允许输入框和文本区域选择
+  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) {
+    return;
+  }
+  event.preventDefault();
+  return false;
+});
+
+// 阻止拖拽
+document.addEventListener("dragstart", (event) => {
+  event.preventDefault();
+  return false;
+});
 

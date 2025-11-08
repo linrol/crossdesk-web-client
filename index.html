@@ -3,21 +3,55 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
     <title>CrossDesk Web Client</title>
+
+    <!-- iOS Web App 配置 -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="apple-mobile-web-app-title" content="CrossDesk" />
+
+    <!-- 图标配置 -->
+    <link rel="apple-touch-icon" href="favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="favicon.ico" />
+    <link rel="icon" type="image/x-icon" href="favicon.ico" />
+
+    <!-- PWA Manifest (可选，用于更好的Web App体验) -->
+    <link rel="manifest" href="manifest.json" />
+
     <link rel="stylesheet" href="styles.css" />
     <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
   </head>
   <body>
-    <div class="container">
-      <h1>CrossDesk Web Client</h1>
-
-      <!-- Connection settings + status -->
-      <div class="top-card">
-        <div class="connection-card">
-          <h2>连接设置</h2>
+    <div class="app-container">
+      <!-- Connection settings overlay (shown when not connected) -->
+      <div id="connection-overlay" class="connection-overlay">
+        <div class="connection-panel">
+          <div class="connection-header">
+            <div class="connection-title-with-icon">
+              <img src="favicon.ico" alt="CrossDesk" class="connection-icon" />
+              <h2>CrossDesk</h2>
+            </div>
+            <div
+              class="status-indicator"
+              id="connection-status-indicator"
+              style="display: none"
+            >
+              <div
+                id="connection-status-led"
+                class="status-led status-led-off"
+              ></div>
+            </div>
+          </div>
           <div class="option">
             <label for="transmission-id">远程设备 ID:</label>
-            <input id="transmission-id" type="text" value="931631602" />
+            <input id="transmission-id" type="text" value="475319798" />
           </div>
           <div class="option">
             <label for="transmission-pwd">密码:</label>
@@ -25,50 +59,15 @@
           </div>
           <div class="actions">
             <button id="connect" disabled>连接</button>
-            <button
-              id="disconnect"
-              style="display: none"
-            >
-              断开连接
-            </button>
-          </div>
-        </div>
-
-        <div class="status-card">
-          <h2>状态</h2>
-          <div class="status-item">
-            ICE状态: <span id="ice-connection-state"></span>
-          </div>
-          <div class="status-item">
-            信令状态: <span id="signaling-state"></span>
-          </div>
-          <div class="status-item">
-            数据通道: <span id="datachannel-state"></span>
+            <button id="disconnect" style="display: none">断开连接</button>
           </div>
         </div>
       </div>
 
       <!-- Video display -->
       <div id="media" style="display: none">
-        <div class="option" style="margin-bottom: 12px">
-          <label for="display-id">显示器 ID: </label>
-          <select id="display-id" style="width: 160px" disabled>
-            <option value="" selected>候选画面 ID...</option>
-          </select>
-          <button id="set-display" disabled>
-            设置
-          </button>
-          <!-- Add fullscreen control buttons -->
-          <button id="fullscreen-btn" class="control-btn">
-            最大化
-          </button>
-          <button id="real-fullscreen-btn" class="control-btn">
-            全屏
-          </button>
-        </div>
-
         <!-- Video container, including draggable virtual mouse -->
-        <div id="video-container" style="position: relative">
+        <div id="video-container" class="video-container">
           <video
             id="video"
             playsinline
@@ -76,65 +75,99 @@
             x5-video-player-type="h5"
             x5-video-player-fullscreen="true"
             muted
-            style="width: 100%"
           ></video>
 
-          <!-- Draggable virtual mouse -->
+          <!-- Connection settings overlay (shown when connected) -->
+          <div
+            id="connected-overlay"
+            class="connected-overlay"
+            style="display: none"
+          >
+            <div class="connected-panel">
+              <div class="connected-header">
+                <div class="connected-controls-row">
+                  <div class="option compact">
+                    <label for="display-id">屏幕: </label>
+                    <select id="display-id" style="width: 140px" disabled>
+                      <option value="" selected>候选画面 ID...</option>
+                    </select>
+                    <button id="set-display" disabled>设置</button>
+                  </div>
+                  <!-- Mobile mouse control mode selector -->
+                  <div
+                    id="mobile-mode-selector"
+                    class="option compact"
+                    style="display: none"
+                  >
+                    <label for="mouse-control-mode">鼠标控制模式: </label>
+                    <select id="mouse-control-mode" style="width: 120px">
+                      <option value="absolute">精准</option>
+                      <option value="relative">增量</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+              <!-- Connection status and disconnect button in top right corner -->
+              <div class="top-right-controls">
+                <div class="connection-status-group">
+                  <span class="connection-status-label">连接状态</span>
+                  <div class="status-indicator">
+                    <div
+                      id="connected-status-led"
+                      class="status-led status-led-off"
+                    ></div>
+                  </div>
+                </div>
+                <button
+                  id="disconnect-connected"
+                  class="disconnect-btn-top-right"
+                >
+                  断开连接
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Draggable virtual mouse: rectangular bar (left/middle/right) -->
           <div id="virtual-mouse">
-            <div class="virtual-mouse-top">
+            <div class="virtual-mouse-row">
               <button id="virtual-left-btn" class="virtual-mouse-btn">
                 左键
               </button>
-              <div id="virtual-wheel" class="virtual-mouse-wheel">滚轮</div>
+              <div id="virtual-wheel" class="virtual-mouse-wheel"></div>
               <button id="virtual-right-btn" class="virtual-mouse-btn">
                 右键
               </button>
-            </div>
-            <div
-              id="virtual-touchpad"
-              class="virtual-mouse-touchpad"
-              style="touch-action: none"
-            >
-              触摸板区域 (请在此区域滑动控制鼠标)
             </div>
             <div id="virtual-mouse-drag-handle" class="drag-handle"></div>
           </div>
         </div>
       </div>
 
-      <!-- Data Channel UI -->
-      <div class="top-card">
-        <div class="connection-card">
-          <h2>数据通道</h2>
-          <div class="option">
+      <!-- Data Channel UI (Debug mode only) -->
+      <div id="debug-panel" class="debug-panel" style="display: none">
+        <div class="debug-header">
+          <h3>调试信息</h3>
+          <div class="debug-header-actions">
+            <div class="option compact">
             <label for="audio-capture">音频捕获:</label>
             <input id="audio-capture" type="checkbox" disabled />
           </div>
-
-          <div
-            id="data-channel"
-            class="status-item"
-            style="
-              height: 200px;
-              overflow: auto;
-              white-space: pre-wrap;
-              font-family: monospace;
-            "
-          ></div>
-          <div style="display: flex; gap: 8px; margin-top: 10px">
-            <input
-              id="dc-input"
-              type="text"
-              placeholder="输入信息发送"
-              style="flex: 1; padding: 8px"
-            />
-            <button id="dc-send" disabled>
-              发送
-            </button>
+            <button id="debug-close" class="debug-close-btn">关闭</button>
+          </div>
+        </div>
+        <div id="data-channel" class="debug-log"></div>
+        <div class="debug-input">
+          <input id="dc-input" type="text" placeholder="输入信息发送" />
+            <button id="dc-send" disabled>发送</button>
           </div>
         </div>
       </div>
-    </div>
+
+    <!-- Debug mode toggle (hidden by default, can be enabled via localStorage) -->
+    <button id="debug-toggle" class="debug-toggle" style="display: none">
+      调试
+    </button>
 
     <script src="control.js"></script>
     <script src="web_client.js"></script>

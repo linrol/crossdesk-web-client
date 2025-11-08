@@ -37,14 +37,14 @@
         dataLog: document.getElementById("data-channel"),
         mediaContainer: document.getElementById("media"),
         videoContainer: document.getElementById("video-container"),
-        fullscreenBtn: document.getElementById("fullscreen-btn"),
-        realFullscreenBtn: document.getElementById("real-fullscreen-btn"),
         virtualMouse: document.getElementById("virtual-mouse"),
         virtualLeftBtn: document.getElementById("virtual-left-btn"),
         virtualRightBtn: document.getElementById("virtual-right-btn"),
         virtualWheel: document.getElementById("virtual-wheel"),
-        virtualTouchpad: document.getElementById("virtual-touchpad"),
+        virtualTouchpad: null,
         virtualDragHandle: document.getElementById("virtual-mouse-drag-handle"),
+        mobileModeSelector: document.getElementById("mobile-mode-selector"),
+        mouseControlMode: document.getElementById("mouse-control-mode"),
       };
 
       this.state = {
@@ -52,13 +52,19 @@
         normalizedPos: { x: 0.5, y: 0.5 },
         lastPointerPos: null,
         lastWheelAt: 0,
-        isFullscreen: false,
-        isRealFullscreen: false,
         touchpadStart: null,
         draggingVirtualMouse: false,
         dragOffset: { x: 0, y: 0 },
         pointerLockToastTimer: null,
         videoRect: null,
+        gestureActive: false,
+        gestureButton: null,
+        gestureStart: null,
+        isMobile: false,
+        mobileControlMode: "absolute", // "absolute" or "relative"
+        touchActive: false,
+        touchStartPos: null,
+        touchLastPos: null,
       };
 
       this.virtualWheelTimer = null;
@@ -77,9 +83,10 @@
 
       this.onVirtualWheelStart = this.onVirtualWheelStart.bind(this);
       this.onVirtualWheelEnd = this.onVirtualWheelEnd.bind(this);
-      this.onTouchpadStart = this.onTouchpadStart.bind(this);
-      this.onTouchpadMove = this.onTouchpadMove.bind(this);
-      this.onTouchpadEnd = this.onTouchpadEnd.bind(this);
+      this.onVirtualLeftStart = this.onVirtualLeftStart.bind(this);
+      this.onVirtualRightStart = this.onVirtualRightStart.bind(this);
+      this.onVirtualButtonMove = this.onVirtualButtonMove.bind(this);
+      this.onVirtualButtonEnd = this.onVirtualButtonEnd.bind(this);
 
       this.onDragHandleTouchStart = this.onDragHandleTouchStart.bind(this);
       this.onDragHandleTouchMove = this.onDragHandleTouchMove.bind(this);
@@ -103,7 +110,6 @@
       this.bindPointerListeners();
       this.bindKeyboardListeners();
       this.setupVirtualMouse();
-      this.setupFullscreenButtons();
     }
 
     setDataChannel(channel) {
@@ -184,10 +190,14 @@
     }
 
     logDataChannel(text) {
-      const { dataLog } = this.elements;
+      const dataLog = document.getElementById("data-channel");
       if (!dataLog) return;
+      // Only log if debug mode is enabled
+      const debugMode = localStorage.getItem("crossdesk-debug") === "true";
+      if (debugMode) {
       dataLog.textContent += `> ${text}\n`;
       dataLog.scrollTop = dataLog.scrollHeight;
+      }
     }
 
     bindPointerLockEvents() {
@@ -262,6 +272,31 @@
     onPointerDown(event) {
       const button = typeof event.button === "number" ? event.button : 0;
       if (button < 0) return;
+      
+      // 移动端模式下，触摸视频区域不触发点击事件，只移动鼠标位置
+      if (this.state.isMobile && event.pointerType === "touch") {
+        event.preventDefault?.();
+        this.ensureVideoRect();
+        if (this.state.videoRect && this.isInsideVideo(event.clientX, event.clientY)) {
+          // 模式1：指哪打哪 - 直接设置鼠标位置
+          if (this.state.mobileControlMode === "absolute") {
+            this.updateNormalizedFromClient(event.clientX, event.clientY);
+            this.sendMouseAction({
+              x: this.state.normalizedPos.x,
+              y: this.state.normalizedPos.y,
+              flag: MouseFlag.move,
+            });
+          } else {
+            // 模式2：增量模式 - 记录起始位置
+            this.state.touchActive = true;
+            this.state.touchStartPos = { x: event.clientX, y: event.clientY };
+            this.state.touchLastPos = { x: event.clientX, y: event.clientY };
+          }
+        }
+        this.elements.video?.setPointerCapture?.(event.pointerId ?? 0);
+        return;
+      }
+
       event.preventDefault?.();
 
       this.state.lastPointerPos = { x: event.clientX, y: event.clientY };
@@ -280,6 +315,49 @@
     }
 
     onPointerMove(event) {
+      // 移动端增量模式处理
+      if (this.state.isMobile && event.pointerType === "touch" && this.state.touchActive && this.state.mobileControlMode === "relative") {
+        event.preventDefault?.();
+        this.ensureVideoRect();
+        if (!this.state.videoRect || !this.state.touchLastPos) return;
+
+        const deltaX = event.clientX - this.state.touchLastPos.x;
+        const deltaY = event.clientY - this.state.touchLastPos.y;
+
+        // 计算增量（相对于视频尺寸）
+        const deltaXNormalized = deltaX / this.state.videoRect.width;
+        const deltaYNormalized = deltaY / this.state.videoRect.height;
+
+        // 更新鼠标位置（增量模式）
+        this.state.normalizedPos.x = clamp01(this.state.normalizedPos.x + deltaXNormalized);
+        this.state.normalizedPos.y = clamp01(this.state.normalizedPos.y + deltaYNormalized);
+
+        this.sendMouseAction({
+          x: this.state.normalizedPos.x,
+          y: this.state.normalizedPos.y,
+          flag: MouseFlag.move,
+        });
+
+        this.state.touchLastPos = { x: event.clientX, y: event.clientY };
+        return;
+      }
+
+      // 移动端指哪打哪模式处理
+      if (this.state.isMobile && event.pointerType === "touch" && this.state.mobileControlMode === "absolute") {
+        event.preventDefault?.();
+        this.ensureVideoRect();
+        if (!this.state.videoRect || !this.isInsideVideo(event.clientX, event.clientY)) return;
+
+        this.updateNormalizedFromClient(event.clientX, event.clientY);
+        this.sendMouseAction({
+          x: this.state.normalizedPos.x,
+          y: this.state.normalizedPos.y,
+          flag: MouseFlag.move,
+        });
+        return;
+      }
+
+      // 桌面端处理
       if (!this.state.pointerLocked && !this.state.lastPointerPos) return;
 
       const movementX = this.state.pointerLocked
@@ -325,6 +403,15 @@
     }
 
     onPointerUp(event) {
+      // 移动端模式下，触摸结束不触发点击事件
+      if (this.state.isMobile && event.pointerType === "touch") {
+        this.elements.video?.releasePointerCapture?.(event.pointerId ?? 0);
+        this.state.touchActive = false;
+        this.state.touchStartPos = null;
+        this.state.touchLastPos = null;
+        return;
+      }
+
       const button = typeof event.button === "number" ? event.button : 0;
       this.elements.video?.releasePointerCapture?.(event.pointerId ?? 0);
       this.state.lastPointerPos = null;
@@ -337,6 +424,12 @@
 
     onPointerCancel() {
       this.state.lastPointerPos = null;
+      // 清理移动端触摸状态
+      if (this.state.isMobile) {
+        this.state.touchActive = false;
+        this.state.touchStartPos = null;
+        this.state.touchLastPos = null;
+      }
     }
 
     onWheel(event) {
@@ -370,36 +463,72 @@
     onTouchStartFallback(event) {
       if (!event.touches?.length) return;
       const touch = event.touches[0];
-      this.state.lastPointerPos = { x: touch.clientX, y: touch.clientY };
       event.preventDefault();
-      this.onPointerDown({
-        button: 0,
-        clientX: touch.clientX,
-        clientY: touch.clientY,
-      });
+      
+      // 移动端模式下，触摸视频区域不触发点击事件
+      this.ensureVideoRect();
+      if (this.state.videoRect && this.isInsideVideo(touch.clientX, touch.clientY)) {
+        if (this.state.mobileControlMode === "absolute") {
+          // 模式1：指哪打哪
+          this.updateNormalizedFromClient(touch.clientX, touch.clientY);
+          this.sendMouseAction({
+            x: this.state.normalizedPos.x,
+            y: this.state.normalizedPos.y,
+            flag: MouseFlag.move,
+          });
+        } else {
+          // 模式2：增量模式
+          this.state.touchActive = true;
+          this.state.touchStartPos = { x: touch.clientX, y: touch.clientY };
+          this.state.touchLastPos = { x: touch.clientX, y: touch.clientY };
+        }
+      }
     }
 
     onTouchMoveFallback(event) {
-      if (!this.state.lastPointerPos || !event.touches?.length) return;
+      if (!event.touches?.length) return;
       const touch = event.touches[0];
       event.preventDefault();
-      this.onPointerMove({
-        clientX: touch.clientX,
-        clientY: touch.clientY,
-        movementX: touch.clientX - this.state.lastPointerPos.x,
-        movementY: touch.clientY - this.state.lastPointerPos.y,
-      });
-      this.state.lastPointerPos = { x: touch.clientX, y: touch.clientY };
+      
+      this.ensureVideoRect();
+      if (!this.state.videoRect) return;
+
+      if (this.state.mobileControlMode === "absolute") {
+        // 模式1：指哪打哪
+        if (this.isInsideVideo(touch.clientX, touch.clientY)) {
+          this.updateNormalizedFromClient(touch.clientX, touch.clientY);
+          this.sendMouseAction({
+            x: this.state.normalizedPos.x,
+            y: this.state.normalizedPos.y,
+            flag: MouseFlag.move,
+          });
+        }
+      } else if (this.state.touchActive && this.state.touchLastPos) {
+        // 模式2：增量模式
+        const deltaX = touch.clientX - this.state.touchLastPos.x;
+        const deltaY = touch.clientY - this.state.touchLastPos.y;
+
+        const deltaXNormalized = deltaX / this.state.videoRect.width;
+        const deltaYNormalized = deltaY / this.state.videoRect.height;
+
+        this.state.normalizedPos.x = clamp01(this.state.normalizedPos.x + deltaXNormalized);
+        this.state.normalizedPos.y = clamp01(this.state.normalizedPos.y + deltaYNormalized);
+
+        this.sendMouseAction({
+          x: this.state.normalizedPos.x,
+          y: this.state.normalizedPos.y,
+          flag: MouseFlag.move,
+        });
+
+        this.state.touchLastPos = { x: touch.clientX, y: touch.clientY };
+      }
     }
 
     onTouchEndFallback(event) {
-      const touch = event.changedTouches?.[0];
-      this.onPointerUp({
-        button: 0,
-        clientX: touch?.clientX ?? 0,
-        clientY: touch?.clientY ?? 0,
-      });
-      this.state.lastPointerPos = null;
+      // 移动端模式下，触摸结束不触发点击事件
+      this.state.touchActive = false;
+      this.state.touchStartPos = null;
+      this.state.touchLastPos = null;
     }
 
     buttonToFlag(button, isDown) {
@@ -465,64 +594,36 @@
         "(hover: hover) and (pointer: fine)"
       ).matches;
 
+      this.state.isMobile = !isDesktop;
+
       if (isDesktop) {
         if (this.elements.virtualMouse) {
           this.elements.virtualMouse.style.pointerEvents = "none";
         }
+        if (this.elements.mobileModeSelector) {
+          this.elements.mobileModeSelector.style.display = "none";
+        }
         return;
       }
 
-      this.elements.virtualLeftBtn?.addEventListener(
-        "touchstart",
-        (event) => {
-          event.preventDefault();
-          this.sendMouseAction({
-            x: this.state.normalizedPos.x,
-            y: this.state.normalizedPos.y,
-            flag: MouseFlag.left_down,
-          });
-        },
-        { passive: false }
-      );
+      // 显示移动端模式选择器
+      if (this.elements.mobileModeSelector) {
+        this.elements.mobileModeSelector.style.display = "flex";
+      }
 
-      this.elements.virtualLeftBtn?.addEventListener(
-        "touchend",
-        (event) => {
-          event.preventDefault();
-          this.sendMouseAction({
-            x: this.state.normalizedPos.x,
-            y: this.state.normalizedPos.y,
-            flag: MouseFlag.left_up,
-          });
-        },
-        { passive: false }
-      );
+      // 绑定模式切换事件
+      if (this.elements.mouseControlMode) {
+        this.elements.mouseControlMode.addEventListener("change", (event) => {
+          this.state.mobileControlMode = event.target.value;
+        });
+        this.state.mobileControlMode = this.elements.mouseControlMode.value;
+      }
 
-      this.elements.virtualRightBtn?.addEventListener(
-        "touchstart",
-        (event) => {
-          event.preventDefault();
-          this.sendMouseAction({
-            x: this.state.normalizedPos.x,
-            y: this.state.normalizedPos.y,
-            flag: MouseFlag.right_down,
-          });
-        },
-        { passive: false }
-      );
-
-      this.elements.virtualRightBtn?.addEventListener(
-        "touchend",
-        (event) => {
-          event.preventDefault();
-          this.sendMouseAction({
-            x: this.state.normalizedPos.x,
-            y: this.state.normalizedPos.y,
-            flag: MouseFlag.right_up,
-          });
-        },
-        { passive: false }
-      );
+      this.elements.virtualLeftBtn?.addEventListener("touchstart", this.onVirtualLeftStart, { passive: false });
+      this.elements.virtualRightBtn?.addEventListener("touchstart", this.onVirtualRightStart, { passive: false });
+      document.addEventListener("touchmove", this.onVirtualButtonMove, { passive: false });
+      document.addEventListener("touchend", this.onVirtualButtonEnd, { passive: false });
+      document.addEventListener("touchcancel", this.onVirtualButtonEnd, { passive: false });
 
       this.elements.virtualWheel?.addEventListener(
         "touchstart",
@@ -537,27 +638,6 @@
       this.elements.virtualWheel?.addEventListener(
         "touchcancel",
         this.onVirtualWheelEnd,
-        { passive: false }
-      );
-
-      this.elements.virtualTouchpad?.addEventListener(
-        "touchstart",
-        this.onTouchpadStart,
-        { passive: false }
-      );
-      this.elements.virtualTouchpad?.addEventListener(
-        "touchmove",
-        this.onTouchpadMove,
-        { passive: false }
-      );
-      this.elements.virtualTouchpad?.addEventListener(
-        "touchend",
-        this.onTouchpadEnd,
-        { passive: false }
-      );
-      this.elements.virtualTouchpad?.addEventListener(
-        "touchcancel",
-        this.onTouchpadEnd,
         { passive: false }
       );
 
@@ -587,52 +667,92 @@
       });
     }
 
-    onTouchpadStart(event) {
+    onVirtualLeftStart(event) {
       const touch = event.touches?.[0];
       if (!touch) return;
       event.preventDefault();
-      this.state.touchpadStart = {
+      this.ensureVideoRect();
+      this.state.gestureActive = true;
+      this.state.gestureButton = { down: MouseFlag.left_down, up: MouseFlag.left_up };
+      this.state.gestureStart = {
         x: touch.clientX,
         y: touch.clientY,
         normalizedX: this.state.normalizedPos.x,
         normalizedY: this.state.normalizedPos.y,
       };
+      // 按下时设置为蓝色
+      if (this.elements.virtualLeftBtn) {
+        this.elements.virtualLeftBtn.style.backgroundColor = "var(--primary-color)";
+        this.elements.virtualLeftBtn.style.color = "#fff";
+      }
+      this.sendMouseAction({
+        x: this.state.normalizedPos.x,
+        y: this.state.normalizedPos.y,
+        flag: MouseFlag.left_down,
+      });
     }
 
-    onTouchpadMove(event) {
+    onVirtualRightStart(event) {
       const touch = event.touches?.[0];
-      if (!touch || !this.state.touchpadStart) return;
+      if (!touch) return;
       event.preventDefault();
+      this.ensureVideoRect();
+      this.state.gestureActive = true;
+      this.state.gestureButton = { down: MouseFlag.right_down, up: MouseFlag.right_up };
+      this.state.gestureStart = {
+        x: touch.clientX,
+        y: touch.clientY,
+        normalizedX: this.state.normalizedPos.x,
+        normalizedY: this.state.normalizedPos.y,
+      };
+      // 按下时设置为蓝色
+      if (this.elements.virtualRightBtn) {
+        this.elements.virtualRightBtn.style.backgroundColor = "var(--primary-color)";
+        this.elements.virtualRightBtn.style.color = "#fff";
+      }
+      this.sendMouseAction({
+        x: this.state.normalizedPos.x,
+        y: this.state.normalizedPos.y,
+        flag: MouseFlag.right_down,
+      });
+    }
 
+    onVirtualButtonMove(event) {
+      if (!this.state.gestureActive || !this.state.gestureStart) return;
+      const touch = event.touches?.[0];
+      if (!touch) return;
+      event.preventDefault();
       this.ensureVideoRect();
       if (!this.state.videoRect) return;
 
       const sensitivity = 2;
-      const deltaX = touch.clientX - this.state.touchpadStart.x;
-      const deltaY = touch.clientY - this.state.touchpadStart.y;
+      const deltaX = touch.clientX - this.state.gestureStart.x;
+      const deltaY = touch.clientY - this.state.gestureStart.y;
+      const newX = this.state.gestureStart.normalizedX + (deltaX / this.state.videoRect.width) * sensitivity;
+      const newY = this.state.gestureStart.normalizedY + (deltaY / this.state.videoRect.height) * sensitivity;
 
-      const newX =
-        this.state.touchpadStart.normalizedX +
-        (deltaX / this.state.videoRect.width) * sensitivity;
-      const newY =
-        this.state.touchpadStart.normalizedY +
-        (deltaY / this.state.videoRect.height) * sensitivity;
-
-      this.state.normalizedPos = {
-        x: clamp01(newX),
-        y: clamp01(newY),
-      };
-
-      this.sendMouseAction({
-        x: this.state.normalizedPos.x,
-        y: this.state.normalizedPos.y,
-        flag: MouseFlag.move,
-      });
+      this.state.normalizedPos = { x: clamp01(newX), y: clamp01(newY) };
+      this.sendMouseAction({ x: this.state.normalizedPos.x, y: this.state.normalizedPos.y, flag: MouseFlag.move });
     }
 
-    onTouchpadEnd(event) {
-      event.preventDefault();
-      this.state.touchpadStart = null;
+    onVirtualButtonEnd(event) {
+      if (!this.state.gestureActive) return;
+      event.preventDefault?.();
+      const upFlag = this.state.gestureButton?.up ?? MouseFlag.left_up;
+      this.sendMouseAction({ x: this.state.normalizedPos.x, y: this.state.normalizedPos.y, flag: upFlag });
+      
+      // 释放时恢复为白色
+      if (upFlag === MouseFlag.left_up && this.elements.virtualLeftBtn) {
+        this.elements.virtualLeftBtn.style.backgroundColor = "rgba(255, 255, 255, 0.9)";
+        this.elements.virtualLeftBtn.style.color = "#333";
+      } else if (upFlag === MouseFlag.right_up && this.elements.virtualRightBtn) {
+        this.elements.virtualRightBtn.style.backgroundColor = "rgba(255, 255, 255, 0.9)";
+        this.elements.virtualRightBtn.style.color = "#333";
+      }
+      
+      this.state.gestureActive = false;
+      this.state.gestureButton = null;
+      this.state.gestureStart = null;
     }
 
     bindVirtualMouseDragging() {
@@ -660,6 +780,8 @@
       event.preventDefault();
       const rect = this.elements.virtualMouse.getBoundingClientRect();
       this.state.draggingVirtualMouse = true;
+      // 添加dragging类以禁用transition
+      this.elements.virtualMouse.classList.add("dragging");
       this.state.dragOffset = {
         x: touch.clientX - rect.left,
         y: touch.clientY - rect.top,
@@ -674,6 +796,7 @@
       event.preventDefault();
 
       const containerRect = this.elements.videoContainer.getBoundingClientRect();
+      // 直接使用触摸位置，减去偏移量
       let newX = touch.clientX - this.state.dragOffset.x - containerRect.left;
       let newY = touch.clientY - this.state.dragOffset.y - containerRect.top;
 
@@ -689,6 +812,7 @@
       newX = Math.max(0, Math.min(newX, maxX));
       newY = Math.max(0, Math.min(newY, maxY));
 
+      // 直接更新位置，不使用requestAnimationFrame以保持跟手
       this.elements.virtualMouse.style.left = `${newX}px`;
       this.elements.virtualMouse.style.top = `${newY}px`;
       this.elements.virtualMouse.style.bottom = "auto";
@@ -697,48 +821,15 @@
 
     onDragHandleTouchEnd() {
       this.state.draggingVirtualMouse = false;
+      // 移除dragging类以恢复transition
+      if (this.elements.virtualMouse) {
+        this.elements.virtualMouse.classList.remove("dragging");
+      }
     }
 
     onDragHandleClick(event) {
       event.stopPropagation();
       this.elements.virtualMouse?.classList.toggle("minimized");
-    }
-
-    setupFullscreenButtons() {
-      this.elements.fullscreenBtn?.addEventListener("click", () => {
-        const media = this.elements.mediaContainer;
-        if (!media) return;
-        this.state.isFullscreen = !this.state.isFullscreen;
-        media.classList.toggle("fullscreen", this.state.isFullscreen);
-        this.elements.fullscreenBtn.textContent = this.state.isFullscreen
-          ? "退出全屏"
-          : "最大化";
-        this.ensureVideoRect();
-      });
-
-      this.elements.realFullscreenBtn?.addEventListener("click", () => {
-        const container = this.elements.videoContainer;
-        if (!container) return;
-        if (!this.state.isRealFullscreen) {
-          const request =
-            container.requestFullscreen ||
-            container.mozRequestFullScreen ||
-            container.webkitRequestFullscreen ||
-            container.msRequestFullscreen;
-          request?.call(container);
-        } else {
-          const exit =
-            document.exitFullscreen ||
-            document.mozCancelFullScreen ||
-            document.webkitExitFullscreen ||
-            document.msExitFullscreen;
-          exit?.call(document);
-        }
-        this.state.isRealFullscreen = !this.state.isRealFullscreen;
-        this.elements.realFullscreenBtn.textContent = this.state.isRealFullscreen
-          ? "退出全屏"
-          : "全屏";
-      });
     }
 
     showPointerLockToast(text, duration = 2500) {
