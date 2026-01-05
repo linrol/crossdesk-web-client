@@ -24,8 +24,8 @@ const elements = {
 const DEFAULT_CONFIG = {
   signalingUrl: "wss://crossdesk.linrol.cn:8053",
   iceServers: [
-    { urls: ["stun:crossdesk.linrol.cn:8054"] },
-    { urls: ["turn:crossdesk.linrol.cn:8054"], username: "crossdesk", credential: "crossdeskpw" },
+    { urls: ["stun:crossdesk.linrol.cn:3478"] },
+    { urls: ["turn:crossdesk.linrol.cn:3478"], username: "crossdesk", credential: "crossdeskpw" },
   ],
   heartbeatIntervalMs: 3000,
   heartbeatTimeoutMs: 10000,
