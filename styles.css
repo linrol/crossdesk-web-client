@@ -381,6 +381,14 @@ button:disabled {
   transform: none;
 }
 
+.secondary-btn {
+  background-color: #607d8b;
+}
+
+.secondary-btn:hover:not(:disabled) {
+  background-color: #546e7a;
+}
+
 #disconnect {
   background-color: var(--danger-color);
 }

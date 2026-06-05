@@ -31,6 +31,10 @@ const DEFAULT_CONFIG = {
   heartbeatIntervalMs: 3000,
   heartbeatTimeoutMs: 10000,
   reconnectDelayMs: 2000,
+  reconnectMaxDelayMs: 30000,
+  reconnectMaxAttempts: 8,
+  interactionGuardEnabled: true,
+  interactionGuardScope: "video", // "video" | "global" | "none"
   clientTag: "web",
 };
 ```
@@ -42,3 +46,11 @@ wss://api.crossdesk.cn:9099 替换为 EXTERNAL_IP:CROSSDESK_SERVER_PORT
 # iceServers
 api.crossdesk.cn:3478 替换为 EXTERNAL_IP:COTURN_PORT
 ```
+
+## WebRTC Adapter 版本锁定
+
+项目不再依赖 `adapter-latest.js`，改为：
+- 本地优先加载固定版本：`vendor/adapter-9.0.1.min.js`
+- 本地加载失败时回退到固定版本 CDN：`https://cdn.jsdelivr.net/npm/webrtc-adapter@9.0.1/out/adapter.min.js`
+
+这样可以避免上游 `latest` 漂移导致的不可控行为，并支持版本追踪与回滚。

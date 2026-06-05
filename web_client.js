@@ -1,11 +1,10 @@
 const elements = {
-  iceState: document.getElementById("ice-connection-state"),
-  signalingState: document.getElementById("signaling-state"),
-  dataChannelState: document.getElementById("datachannel-state"),
   displaySelect: document.getElementById("display-id"),
   connectBtn: document.getElementById("connect"),
+  retrySignalingBtn: document.getElementById("retry-signaling"),
   disconnectBtn: document.getElementById("disconnect"),
   media: document.getElementById("media"),
+  videoContainer: document.getElementById("video-container"),
   video: document.getElementById("video"),
   audio: document.getElementById("audio"),
   connectionOverlay: document.getElementById("connection-overlay"),
@@ -30,6 +29,10 @@ const DEFAULT_CONFIG = {
   heartbeatIntervalMs: 3000,
   heartbeatTimeoutMs: 10000,
   reconnectDelayMs: 2000,
+  reconnectMaxDelayMs: 30000,
+  reconnectMaxAttempts: 8,
+  interactionGuardEnabled: true,
+  interactionGuardScope: "video", // "video" | "global" | "none"
   clientTag: "web",
 };
 const CONFIG = Object.assign({}, DEFAULT_CONFIG, window.CROSSDESK_CONFIG || {});
@@ -37,45 +40,284 @@ const CONFIG = Object.assign({}, DEFAULT_CONFIG, window.CROSSDESK_CONFIG || {});
 const control = window.CrossDeskControl;
 let pc = null;
 let clientId = "000000";
+let isLoggedIn = false;
+let websocket = null;
 let heartbeatTimer = null;
+let reconnectTimer = null;
+let reconnectAttempt = 0;
 let lastPongAt = Date.now();
+let connectHintTimer = null;
+const CONNECT_BUTTON_DEFAULT_TEXT = elements.connectBtn
+  ? elements.connectBtn.textContent
+  : "连接";
 let trackIndex = 0; // Track index for display_id (0, 1, 2, ...)
 const trackMap = new Map(); // Map<index, track> - stores tracks by their display_id index
 
-const websocket = new WebSocket(CONFIG.signalingUrl);
+const SignalingConnectionState = Object.freeze({
+  connecting: "connecting",
+  connected: "connected",
+  reconnecting: "reconnecting",
+  disconnected: "disconnected",
+});
+let signalingConnectionState = SignalingConnectionState.disconnected;
+const RECONNECT_BASE_DELAY_MS = Math.max(
+  500,
+  Number(CONFIG.reconnectDelayMs) || 1000
+);
+const RECONNECT_MAX_DELAY_MS = Math.max(
+  RECONNECT_BASE_DELAY_MS,
+  Number(CONFIG.reconnectMaxDelayMs) || 30000
+);
+const RECONNECT_MAX_ATTEMPTS = Number.isFinite(Number(CONFIG.reconnectMaxAttempts))
+  ? Math.max(1, Number(CONFIG.reconnectMaxAttempts))
+  : 8;
 
-websocket.addEventListener("message", (event) => {
-  if (typeof event.data !== "string") return;
-  const message = JSON.parse(event.data);
+function isSignalingOpen() {
+  return !!websocket && websocket.readyState === WebSocket.OPEN;
+}
 
-  if (message.type === "pong") {
-    lastPongAt = Date.now();
+function sendSignaling(payload, options = {}) {
+  const {
+    label = "signaling",
+    onFailure = null,
+    suppressWarning = false,
+  } = options;
+
+  if (!isSignalingOpen()) {
+    if (!suppressWarning) {
+      console.warn(`[CrossDesk] Skip signaling send (${label}): socket not open`);
+    }
+    if (typeof onFailure === "function") {
+      try {
+        onFailure("not_open");
+      } catch (callbackErr) {
+        console.error("sendSignaling onFailure callback failed", callbackErr);
+      }
+    }
+    return false;
+  }
+  try {
+    websocket.send(
+      typeof payload === "string" ? payload : JSON.stringify(payload)
+    );
+    return true;
+  } catch (err) {
+    console.error(`[CrossDesk] Failed signaling send (${label})`, err);
+    if (typeof onFailure === "function") {
+      try {
+        onFailure("send_error", err);
+      } catch (callbackErr) {
+        console.error("sendSignaling onFailure callback failed", callbackErr);
+      }
+    }
+    return false;
+  }
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseSignalingMessage(rawData) {
+  let message;
+  try {
+    message = JSON.parse(rawData);
+  } catch (err) {
+    console.warn("Invalid signaling message JSON", err);
+    return null;
+  }
+
+  if (!isPlainObject(message)) {
+    console.warn("Invalid signaling message payload type");
+    return null;
+  }
+
+  if (typeof message.type !== "string" || message.type.length === 0) {
+    console.warn("Invalid signaling message type");
+    return null;
+  }
+
+  return message;
+}
+
+function updateConnectAvailability() {
+  const canConnect =
+    signalingConnectionState === SignalingConnectionState.connected && isLoggedIn;
+  enableConnectButton(canConnect);
+  if (elements.connectBtn && !connectHintTimer) {
+    elements.connectBtn.textContent = CONNECT_BUTTON_DEFAULT_TEXT;
+  }
+}
+
+function showConnectInitializingHint() {
+  if (!elements.connectBtn) return;
+  if (connectHintTimer) {
+    clearTimeout(connectHintTimer);
+  }
+  elements.connectBtn.textContent = "初始化中...";
+  elements.connectBtn.disabled = true;
+  connectHintTimer = setTimeout(() => {
+    connectHintTimer = null;
+    updateConnectAvailability();
+  }, 1500);
+}
+
+function setSignalingConnectionState(nextState) {
+  signalingConnectionState = nextState;
+
+  updateConnectAvailability();
+
+  if (elements.retrySignalingBtn) {
+    const showRetry =
+      nextState === SignalingConnectionState.reconnecting ||
+      nextState === SignalingConnectionState.disconnected;
+    elements.retrySignalingBtn.style.display = showRetry ? "inline-block" : "none";
+    elements.retrySignalingBtn.disabled = false;
+  }
+}
+
+function connectSignaling(isReconnect = false) {
+  stopHeartbeat();
+  isLoggedIn = false;
+  clientId = "000000";
+  if (connectHintTimer) {
+    clearTimeout(connectHintTimer);
+    connectHintTimer = null;
+  }
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const previousSocket = websocket;
+  if (previousSocket) {
+    websocket = null;
+    try {
+      previousSocket.close();
+    } catch (err) {}
+  }
+
+  setSignalingConnectionState(
+    isReconnect
+      ? SignalingConnectionState.reconnecting
+      : SignalingConnectionState.connecting
+  );
+
+  let socket;
+  try {
+    socket = new WebSocket(CONFIG.signalingUrl);
+  } catch (err) {
+    console.error("Failed to create signaling websocket", err);
+    scheduleReconnect("socket_create_failed");
     return;
   }
 
-  handleSignalingMessage(message);
-});
+  websocket = socket;
 
-websocket.addEventListener("open", () => {
-  enableConnectButton(true);
-  sendLogin();
-  startHeartbeat();
-});
+  socket.addEventListener("message", (event) => {
+    if (socket !== websocket) return;
+    if (typeof event.data !== "string") return;
 
-websocket.addEventListener("close", () => {
+    const message = parseSignalingMessage(event.data);
+    if (!message) return;
+
+    if (message.type === "pong") {
+      lastPongAt = Date.now();
+      return;
+    }
+
+    handleSignalingMessage(message);
+  });
+
+  socket.addEventListener("open", () => {
+    if (socket !== websocket) return;
+    reconnectAttempt = 0;
+    setSignalingConnectionState(SignalingConnectionState.connected);
+    sendLogin();
+    startHeartbeat();
+  });
+
+  socket.addEventListener("close", () => {
+    if (socket !== websocket) return;
+    websocket = null;
+    stopHeartbeat();
+    scheduleReconnect("socket_closed");
+  });
+
+  socket.addEventListener("error", () => {
+    if (socket !== websocket) return;
+    scheduleReconnect("socket_error");
+  });
+}
+
+function getNextReconnectDelayMs(nextAttempt) {
+  return Math.min(
+    RECONNECT_MAX_DELAY_MS,
+    RECONNECT_BASE_DELAY_MS * Math.pow(2, Math.max(0, nextAttempt - 1))
+  );
+}
+
+function scheduleReconnect(reason = "unknown") {
+  if (reconnectTimer) return;
+
   stopHeartbeat();
-  enableConnectButton(false);
-});
 
-websocket.addEventListener("error", () => {
-  stopHeartbeat();
-  scheduleReconnect();
-});
+  if (reconnectAttempt >= RECONNECT_MAX_ATTEMPTS) {
+    setSignalingConnectionState(SignalingConnectionState.disconnected);
+    return;
+  }
+
+  const nextAttempt = reconnectAttempt + 1;
+  const delayMs = getNextReconnectDelayMs(nextAttempt);
+  setSignalingConnectionState(SignalingConnectionState.reconnecting);
+
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    reconnectAttempt = nextAttempt;
+    connectSignaling(true);
+  }, delayMs);
+}
+
+function triggerReconnect(reason) {
+  scheduleReconnect(reason);
+  const socket = websocket;
+  if (!socket) return;
+  if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+    try {
+      socket.close();
+    } catch (err) {}
+  }
+}
+
+function retrySignalingNow() {
+  reconnectAttempt = 0;
+  connectSignaling(true);
+}
 
 function handleSignalingMessage(message) {
+  if (!isPlainObject(message) || typeof message.type !== "string") {
+    return;
+  }
+
   switch (message.type) {
     case "login":
-      clientId = message.user_id.split("@")[0];
+      if (typeof message.user_id === "string" && message.user_id.trim().length > 0) {
+        const nextClientId = message.user_id.trim().split("@")[0];
+        if (!nextClientId) {
+          console.warn("Invalid login message user_id");
+          break;
+        }
+        clientId = nextClientId;
+        isLoggedIn = true;
+        if (connectHintTimer) {
+          clearTimeout(connectHintTimer);
+          connectHintTimer = null;
+        }
+        updateConnectAvailability();
+      } else {
+        console.warn("Invalid login message: missing user_id");
+      }
       break;
     case "user_join_transmission":
       // Handle join transmission response
@@ -105,15 +347,39 @@ function handleSignalingMessage(message) {
       }
       break;
     case "offer":
-      handleOffer(message);
+      if (typeof message.sdp !== "string" || message.sdp.length === 0) {
+        console.warn("Invalid offer message: missing sdp");
+        break;
+      }
+      handleOffer({ type: "offer", sdp: message.sdp });
       break;
     case "new_candidate_mid":
       if (!pc) return;
+      if (typeof message.candidate !== "string" || message.candidate.length === 0) {
+        console.warn("Invalid ICE candidate message: missing candidate");
+        break;
+      }
+      const candidateInit = {
+        candidate: message.candidate,
+      };
+      if (typeof message.mid === "string" && message.mid.length > 0) {
+        candidateInit.sdpMid = message.mid;
+      }
+      if (
+        Number.isInteger(message.sdpMLineIndex) &&
+        message.sdpMLineIndex >= 0
+      ) {
+        candidateInit.sdpMLineIndex = message.sdpMLineIndex;
+      }
+      if (
+        typeof candidateInit.sdpMid !== "string" &&
+        !Number.isInteger(candidateInit.sdpMLineIndex)
+      ) {
+        console.warn("Invalid ICE candidate message: missing mid and sdpMLineIndex");
+        break;
+      }
       pc.addIceCandidate(
-        new RTCIceCandidate({
-          sdpMid: message.mid,
-          candidate: message.candidate,
-        })
+        new RTCIceCandidate(candidateInit)
       ).catch((err) => console.error("Error adding ICE candidate", err));
       break;
     default:
@@ -125,11 +391,18 @@ function startHeartbeat() {
   stopHeartbeat();
   lastPongAt = Date.now();
   heartbeatTimer = setInterval(() => {
-    if (websocket.readyState === WebSocket.OPEN) {
-      websocket.send(JSON.stringify({ type: "ping", ts: Date.now() }));
-    }
+    sendSignaling(
+      { type: "ping", ts: Date.now() },
+      {
+        label: "ping",
+        suppressWarning: true,
+        onFailure: () => {
+          triggerReconnect("ping_send_failed");
+        },
+      }
+    );
     if (Date.now() - lastPongAt > CONFIG.heartbeatTimeoutMs) {
-      scheduleReconnect();
+      triggerReconnect("heartbeat_timeout");
     }
   }, CONFIG.heartbeatIntervalMs);
 }
@@ -140,16 +413,19 @@ function stopHeartbeat() {
   heartbeatTimer = null;
 }
 
-function scheduleReconnect() {
-  try {
-    websocket.close();
-  } catch (err) {}
-  setTimeout(() => window.location.reload(), CONFIG.reconnectDelayMs);
+function sendLogin() {
+  sendSignaling(
+    { type: "login", user_id: CONFIG.clientTag },
+    {
+      label: "login",
+      onFailure: () => {
+        triggerReconnect("login_send_failed");
+      },
+    }
+  );
 }
 
-function sendLogin() {
-  websocket.send(JSON.stringify({ type: "login", user_id: CONFIG.clientTag }));
-}
+connectSignaling(false);
 
 function handleOffer(offer) {
   pc = createPeerConnection();
@@ -168,7 +444,6 @@ function createPeerConnection() {
 
   peer.addEventListener("iceconnectionstatechange", () => {
     const state = peer.iceConnectionState;
-    updateStatus(elements.iceState, state);
     // Update status LED: connected when ICE state is "connected"
     const isConnected = state === "connected";
     updateStatusLed(elements.connectionStatusLed, isConnected, true);
@@ -196,27 +471,27 @@ function createPeerConnection() {
       }
     }
   });
-  updateStatus(elements.iceState, peer.iceConnectionState);
   const isConnected = peer.iceConnectionState === "connected";
   updateStatusLed(elements.connectionStatusLed, isConnected, true);
   updateStatusLed(elements.connectedStatusLed, isConnected, false);
 
-  peer.addEventListener("signalingstatechange", () => {
-    updateStatus(elements.signalingState, peer.signalingState);
-  });
-  updateStatus(elements.signalingState, peer.signalingState);
-
   peer.onicecandidate = ({ candidate }) => {
     if (!candidate) return;
-    websocket.send(
-      JSON.stringify({
+    sendSignaling(
+      {
         type: "new_candidate_mid",
         transmission_id: getTransmissionId(),
         user_id: clientId,
         remote_user_id: getTransmissionId(),
         candidate: candidate.candidate,
         mid: candidate.sdpMid,
-      })
+      },
+      {
+        label: "new_candidate_mid",
+        onFailure: () => {
+          triggerReconnect("candidate_send_failed");
+        },
+      }
     );
   };
 
@@ -307,12 +582,10 @@ function createPeerConnection() {
 
 function bindDataChannel(channel) {
   channel.addEventListener("open", () => {
-    updateStatus(elements.dataChannelState, "open");
     enableDataChannelUi(true);
   });
 
   channel.addEventListener("close", () => {
-    updateStatus(elements.dataChannelState, "closed");
     enableDataChannelUi(false);
     control.setDataChannel(null);
   });
@@ -325,15 +598,24 @@ function bindDataChannel(channel) {
 async function sendAnswer(peer) {
   await peer.setLocalDescription(await peer.createAnswer());
   await waitIceGathering(peer);
-  websocket.send(
-    JSON.stringify({
+  const sent = sendSignaling(
+    {
       type: "answer",
       transmission_id: getTransmissionId(),
       user_id: clientId,
       remote_user_id: getTransmissionId(),
       sdp: peer.localDescription.sdp,
-    })
+    },
+    {
+      label: "answer",
+      onFailure: () => {
+        triggerReconnect("answer_send_failed");
+      },
+    }
   );
+  if (!sent) {
+    throw new Error("Failed to send answer");
+  }
 }
 
 function waitIceGathering(peer) {
@@ -352,31 +634,45 @@ function getTransmissionId() {
 }
 
 function getTransmissionPwd() {
-  return document.getElementById("transmission-pwd").value.trim();
+  return document.getElementById("transmission-pwd").value.trim().slice(0, 6);
 }
 
 function sendJoinRequest() {
-  websocket.send(
-    JSON.stringify({
+  return sendSignaling(
+    {
       type: "join_transmission",
       user_id: clientId,
       transmission_id: `${getTransmissionId()}@${getTransmissionPwd()}`,
-    })
+    },
+    { label: "join_transmission" }
   );
 }
 
 function sendLeaveRequest() {
-  websocket.send(
-    JSON.stringify({
+  return sendSignaling(
+    {
       type: "user_leave_transmission",
       user_id: clientId,
       transmission_id: getTransmissionId(),
-    })
+    },
+    {
+      label: "user_leave_transmission",
+      suppressWarning: true,
+    }
   );
 }
 
 function connect() {
   if (!elements.connectBtn || !elements.disconnectBtn || !elements.media) return;
+  if (!isSignalingOpen()) {
+    showConnectInitializingHint();
+    triggerReconnect("connect_without_signaling");
+    return;
+  }
+  if (!isLoggedIn) {
+    showConnectInitializingHint();
+    return;
+  }
   elements.connectBtn.style.display = "none";
   elements.disconnectBtn.style.display = "inline-block";
   elements.media.style.display = "flex";
@@ -404,7 +700,10 @@ function connect() {
   if (elements.connectingMessageText) {
     elements.connectingMessageText.textContent = "连接中...";
   }
-  sendJoinRequest();
+  if (!sendJoinRequest()) {
+    triggerReconnect("join_send_failed");
+    disconnect();
+  }
 }
 
 function disconnect() {
@@ -437,12 +736,11 @@ function disconnect() {
     elements.connectedPanel.style.right = "auto";
   }
 
-  sendLeaveRequest();
+  if (!sendLeaveRequest()) {
+    console.warn("[CrossDesk] Skip leave_transmission: signaling unavailable during disconnect");
+  }
   teardownPeerConnection();
   enableDataChannelUi(false);
-  updateStatus(elements.iceState, "");
-  updateStatus(elements.signalingState, "");
-  updateStatus(elements.dataChannelState, "closed");
   // Reset track index and clear display select options
   trackIndex = 0;
   trackMap.clear();
@@ -511,11 +809,6 @@ function teardownPeerConnection() {
     elements.audio.srcObject.getTracks().forEach((track) => track.stop());
     elements.audio.srcObject = null;
   }
-}
-
-function updateStatus(element, value) {
-  if (!element) return;
-  element.textContent = value || "";
 }
 
 // Update status LED indicator
@@ -593,6 +886,10 @@ if (elements.disconnectBtn) {
 
 if (elements.disconnectConnected) {
   elements.disconnectConnected.addEventListener("click", disconnect);
+}
+
+if (elements.retrySignalingBtn) {
+  elements.retrySignalingBtn.addEventListener("click", retrySignalingNow);
 }
 
 if (elements.displaySelect) {
@@ -1244,54 +1541,79 @@ window.connect = connect;
 window.disconnect = disconnect;
 window.setDisplayId = setDisplayId;
 
-// 禁止复制、剪切、粘贴等操作
+function isEditableTarget(target) {
+  if (!target || typeof Element === "undefined" || !(target instanceof Element)) {
+    return false;
+  }
+  return !!target.closest(
+    "input, textarea, select, [contenteditable='true'], [contenteditable='']"
+  );
+}
+
+function shouldGuardInteraction(event) {
+  if (!CONFIG.interactionGuardEnabled) return false;
+  const scope = String(CONFIG.interactionGuardScope || "video").toLowerCase();
+  if (scope === "none") return false;
+
+  const target = event?.target;
+  if (!target || typeof Element === "undefined" || !(target instanceof Element)) {
+    return false;
+  }
+
+  // Always keep editable fields usable for accessibility/password manager flows.
+  if (isEditableTarget(target)) return false;
+
+  if (scope === "global") return true;
+  if (scope !== "video") return false;
+
+  // Default: only guard interactions inside the remote video interaction area.
+  if (elements.videoContainer && elements.videoContainer.contains(target)) {
+    return true;
+  }
+  if (elements.video && elements.video.contains(target)) {
+    return true;
+  }
+  return false;
+}
+
 document.addEventListener("copy", (event) => {
+  if (!shouldGuardInteraction(event)) return;
   event.preventDefault();
-  event.clipboardData.setData("text/plain", "");
+  if (event.clipboardData) {
+    event.clipboardData.setData("text/plain", "");
+  }
   return false;
 });
 
 document.addEventListener("cut", (event) => {
+  if (!shouldGuardInteraction(event)) return;
   event.preventDefault();
-  event.clipboardData.setData("text/plain", "");
+  if (event.clipboardData) {
+    event.clipboardData.setData("text/plain", "");
+  }
   return false;
 });
 
 document.addEventListener("paste", (event) => {
-  // 允许在输入框中粘贴
-  const target = event.target;
-  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-    return; // 允许输入框粘贴
-  }
+  if (!shouldGuardInteraction(event)) return;
   event.preventDefault();
   return false;
 });
 
-// 阻止右键菜单（可选，但保留以增强保护）
 document.addEventListener("contextmenu", (event) => {
-  // 允许在输入框上显示右键菜单
-  const target = event.target;
-  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) {
-    return; // 允许输入框右键菜单
-  }
+  if (!shouldGuardInteraction(event)) return;
   event.preventDefault();
   return false;
 });
 
-// 阻止选择文本（通过鼠标拖拽）
 document.addEventListener("selectstart", (event) => {
-  const target = event.target;
-  // 允许输入框和文本区域选择
-  if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT")) {
-    return;
-  }
+  if (!shouldGuardInteraction(event)) return;
   event.preventDefault();
   return false;
 });
 
-// 阻止拖拽
 document.addEventListener("dragstart", (event) => {
+  if (!shouldGuardInteraction(event)) return;
   event.preventDefault();
   return false;
 });
-

@@ -1,13 +1,65 @@
 <!-- index.html -->
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
     />
-    <title>CrossDesk Web Client</title>
+    <title>CrossDesk Web Client - 浏览器远程桌面客户端</title>
+    <meta
+      name="description"
+      content="CrossDesk Web Client 是 CrossDesk 的浏览器远程桌面客户端，可通过设备 ID 和密码连接远程桌面，支持 WebRTC 画面传输、鼠标键盘控制和移动端操作。"
+    />
+    <meta
+      name="keywords"
+      content="CrossDesk, CrossDesk Web Client, 远程桌面, WebRTC, 远程控制, 浏览器远程连接"
+    />
+    <meta name="application-name" content="CrossDesk Web Client" />
+    <meta name="author" content="CrossDesk" />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1,max-video-preview:-1" />
+    <link rel="canonical" href="https://web.crossdesk.cn/" />
+
+    <!-- 搜索和社交分享展示 -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="CrossDesk" />
+    <meta property="og:title" content="CrossDesk Web Client - 浏览器远程桌面客户端" />
+    <meta
+      property="og:description"
+      content="在浏览器中使用 CrossDesk 连接远程桌面，支持 WebRTC 画面传输、鼠标键盘控制和移动端操作。"
+    />
+    <meta property="og:url" content="https://web.crossdesk.cn/" />
+    <meta property="og:image" content="https://web.crossdesk.cn/icons/crossdesk-180-square.png" />
+    <meta property="og:image:alt" content="CrossDesk Web Client" />
+    <meta property="og:locale" content="zh_CN" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="CrossDesk Web Client - 浏览器远程桌面客户端" />
+    <meta
+      name="twitter:description"
+      content="在浏览器中使用 CrossDesk 连接远程桌面，支持 WebRTC 画面传输、鼠标键盘控制和移动端操作。"
+    />
+    <meta name="twitter:image" content="https://web.crossdesk.cn/icons/crossdesk-180-square.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "CrossDesk Web Client",
+        "alternateName": "CrossDesk",
+        "url": "https://web.crossdesk.cn/",
+        "description": "CrossDesk Web Client 是 CrossDesk 的浏览器远程桌面客户端，可通过设备 ID 和密码连接远程桌面，支持 WebRTC 画面传输、鼠标键盘控制和移动端操作。",
+        "applicationCategory": "RemoteDesktopApplication",
+        "operatingSystem": "Windows, macOS, Linux, Android, iOS",
+        "browserRequirements": "Requires a modern browser with WebRTC support",
+        "inLanguage": "zh-CN",
+        "image": "https://web.crossdesk.cn/icons/crossdesk-180-square.png",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        }
+      }
+    </script>
 
     <!-- iOS Web App 配置 -->
     <meta name="mobile-web-app-capable" content="yes" />
@@ -17,6 +69,7 @@
       content="black-translucent"
     />
     <meta name="apple-mobile-web-app-title" content="CrossDesk" />
+    <meta name="theme-color" content="#2196f3" />
 
     <!-- 图标配置 -->
     <link rel="icon" type="image/x-icon" href="favicon.ico" />
@@ -29,10 +82,14 @@
     <link rel="manifest" href="manifest.json" />
 
     <link rel="stylesheet" href="styles.css" />
-    <script src="https://webrtc.github.io/adapter/adapter-latest.js"></script>
+    <script
+      src="vendor/adapter-9.0.1.min.js"
+      onload="console.info('[CrossDesk] Loaded WebRTC adapter from local: vendor/adapter-9.0.1.min.js');"
+      onerror="console.warn('[CrossDesk] Failed to load local WebRTC adapter. Falling back to pinned CDN version.');(function(){var s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/webrtc-adapter@9.0.1/out/adapter.min.js';s.onload=function(){console.warn('[CrossDesk] Loaded WebRTC adapter from CDN fallback: https://cdn.jsdelivr.net/npm/webrtc-adapter@9.0.1/out/adapter.min.js');};s.onerror=function(){console.error('[CrossDesk] Failed to load WebRTC adapter from both local and CDN fallback.');};document.head.appendChild(s);}());"
+    ></script>
   </head>
   <body>
-    <div class="app-container">
+    <div class="app-container" data-nosnippet>
       <!-- Connection settings overlay (shown when not connected) -->
       <div id="connection-overlay" class="connection-overlay">
         <div class="connection-panel">
@@ -59,10 +116,13 @@
             </div>
             <div class="option">
               <label for="transmission-pwd">密码:</label>
-              <input id="transmission-pwd" type="password" value="" autocomplete="current-password" />
+              <input id="transmission-pwd" type="password" value="" autocomplete="current-password" maxlength="6" />
             </div>
             <div class="actions">
               <button id="connect" type="button" disabled>连接</button>
+              <button id="retry-signaling" type="button" class="secondary-btn" style="display: none">
+                重连服务器
+              </button>
               <button id="disconnect" type="button" style="display: none">断开连接</button>
             </div>
           </form>
